@@ -1,0 +1,1367 @@
+---
+title: "09.30.2018-serpnonserp_summer2016_article"
+author: "Alexandria igwe"
+date: "9/30/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Microbial Community Analysis
+##Load Libraries
+```{r}
+library(phyloseq)
+library(dplyr)
+library(pairwiseAdonis)
+library(DESeq2)
+library(vegan)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+```
+##Import Data
+```{r import data, include=FALSE}
+otu <-readRDS('~/Desktop/R/serpnonserp_summer2016/amplicon_analysis/output/dada2/serpnonserp_summer2016_otu_dada.rds')
+tax <-readRDS("~/Desktop/R/serpnonserp_summer2016/amplicon_analysis/output/dada2/serpnonserp_summer2016_silva.rds")
+fitGTR <- readRDS("/Users/anigwe/Desktop/R/serpnonserp_summer2016/amplicon_analysis/input/serpnonserp_summer2016_tree.RDS")
+ps.metadata <- read.table("/Users/anigwe/Desktop/R/serpnonserp_summer2016/amplicon_analysis/input/serpnonserp_summer2016_meta.txt", sep="\t", header=T, row.names=1)
+```
+##Create phyloseq object
+```{r otu table, include=FALSE}
+OTU = otu_table(otu, taxa_are_rows=FALSE)
+taxa_names(OTU)
+
+TAX = tax_table(tax)
+colnames(tax)
+
+TREE = phy_tree(fitGTR$tree)
+
+taxa_names(OTU) <- taxa_names(TAX)
+ps = phyloseq(OTU, sample_data(ps.metadata), TAX, TREE)
+ps
+```
+##Manipulate phyloseq object
+###Change column names
+```{r change column names, include=FALSE}
+#http://deneflab.github.io/MicrobeMiseq/demos/mothur_2_phyloseq.html
+colnames(tax_table(ps))
+colnames(tax_table(ps)) <- c("Kingdom", "Phylum", "Class", 
+  "Order", "Family", "Genus", "Species")
+colnames(tax_table(ps))
+```
+###Rarefaction curve
+```{r, include=TRUE}
+#rarefaction curve practice: http://www.fromthebottomoftheheap.net/2015/04/16/drawing-rarefaction-curves-with-custom-colours/
+#below: plot rarefaction curve to check before rarefying
+serpnon.otu <- as(otu_table(ps), "matrix")
+Rarecurve <- rarecurve((serpnon.otu), step = 50, xlab = "Reads", ylab = "Amplicon Sequence Variants (ASV)", label = TRUE)
+```
+###Prune taxa
+```{r}
+ps <- prune_taxa(taxa_sums(ps)>0, ps)
+ps
+```
+###Subset samples to remove low-abundance samples
+```{r}
+serpnon <- subset_samples(ps,sample_sums(ps)>1000)
+serpnon
+```
+###Remove mitochondria and chloroplast
+```{r}
+serpnon <- serpnon %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+    Family  != "Mitochondria" &
+    Class   != "Chloroplast"
+  )
+serpnon
+```
+###Change taxa names to 'Seq#'
+```{r}
+taxa_names(serpnon) <- paste0("Seq", seq(ntaxa(serpnon)))
+serpnon
+serpnon
+```
+##Subset FIELD samples only
+```{r}
+serpnon.field <- serpnon %>% subset_samples(plant %in% c("Gilia","Plantago","Trifolium","Collinsia", "Bulk") & location == "field" & site != ".")
+```
+###Set Field Plant Names
+```{r}
+field_names <- c(
+                    `Gilia` = "G. tricolor",
+                    `Plantago` = "P. erecta",
+                    `Trifolium` = "T. fucatum",
+                    `Collinsia` = "C. sparsiflora",
+                    `Bulk` = "Bulk"
+                    )
+```
+##Normalize FIELD data and determine amount of ASV assignments
+```{r}
+serpnon.field_prop <- transform_sample_counts(serpnon.field, function(x) x/sum(x))
+serpnon.field_prop <- subset_taxa(serpnon.field_prop,taxa_sums(serpnon.field_prop)>0)
+dim(otu_table(serpnon.field_prop)) #for number of ASVs assigned with SUM of reads per sample
+```
+##What is the relative abundance of each phylum within the different FIELD samples?
+```{r}
+#wrangle data
+serpnon.field_phylum <- serpnon.field_prop %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  #transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)          
+
+#table of abundances
+sf_phylum <- serpnon.field_phylum %>% group_by(soil,plant,Phylum) %>% dplyr::summarise(mean(Abundance, na.rm = TRUE))
+colnames(sf_phylum)<-c("Soil","Plant","Phylum","mean")
+sf_phylum
+
+#bar graph
+##Supplementar Figure 2a
+sf_phylum_bar<-ggplot(serpnon.field_phylum, aes(x = plant, y = Abundance, fill = Phylum)) +
+  theme_bw() +
+  scale_fill_viridis(discrete=TRUE) +
+  #scale_fill_hue(l=40, c=35) +
+  facet_grid(.~soil) +
+  geom_bar(stat="identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  theme(text = element_text(size=20), axis.title.x=element_blank(), axis.text.x = element_text(angle=45, hjust=1)) +
+  scale_x_discrete(breaks=c("Bulk", "Collinsia", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk", "C. sparsiflora", "G. tricolor","P. erecta","T. fucatum")) +
+  ylab ("Relateve Abundance (Phyla > 2%)") +
+  theme(axis.text.x = element_text(face = "italic"))
+sf_phylum_bar
+```
+##What is the richness of FIELD soil x plant
+```{r plot richness}
+#Supplementary Figure 2b
+#Even when I use untrimmed data, the error appears that says "The data you have provided does not have any singleton"
+sf_richness_plot <- plot_richness(serpnon.field_prop, x="plant", measures=c("Shannon","Simpson"),color="soil",shape="site") + geom_boxplot() +
+  theme_bw() + theme(axis.text.x= element_text(face="italic",angle=45, hjust=0.7, vjust=0.6), axis.title.x=element_blank()) + scale_x_discrete(breaks=c("Bulk", "Collinsia", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk", "C. sparsiflora", "G. tricolor","P. erecta","T. fucatum")) + scale_color_viridis(discrete=TRUE) +
+  #facet_wrap(~soil) + 
+  labs(title="Alpha Diversity Indices", subtitle="Field")
+sf_richness_plot
+
+sf_richness_plot$layers
+sf_richness_plot$layers <- sf_richness_plot$layers[-1]
+
+#table of richness
+sf.richness <- estimate_richness(serpnon.field_prop, measures=c("Shannon", "Simpson"))
+sf.richness
+
+#statistical analysis of shannon and simpson
+field.fit.shannon <- lm(estimate_richness(serpnon.field)$Shannon ~ soil*plant, data=as(sample_data(serpnon.field), "data.frame"))
+summary(aov(field.fit.shannon))
+TukeyHSD(aov(field.fit.shannon))
+
+field.fit.simpson <- lm(estimate_richness(serpnon.field)$Simpson ~ soil*plant, data=as(sample_data(serpnon.field), "data.frame"))
+summary(aov(field.fit.simpson))
+TukeyHSD(aov(field.fit.simpson))
+```
+##Are there differences in the microbial community composition of FIELD samples?
+```{r}
+#ordination
+ord.nmds.bray.field <- ordinate(serpnon.field_prop, method="NMDS", distance="bray")
+
+#visualization of relationship
+#Figure 1 - widen plot
+bf.facet <- plot_ordination(serpnon.field_prop, ord.nmds.bray.field, color="soil", shape="site") + facet_grid(~plant, labeller = as_labeller(field_names)) +
+  theme_bw() + theme(text = element_text(size=20), legend.title=element_blank()) + geom_point(size=5) +
+  theme(legend.text = element_text(size = 20)) +
+  labs(title="NMDS of Bray-Curtis Dissimilarity") +
+  theme(strip.text = element_text(face = "italic"))
+  #stat_ellipse(type = "norm", linetype = 2) +
+  #stat_ellipse(type = "t")
+bf.facet + scale_color_viridis(discrete=TRUE)
+
+#stats
+serpnon.field.bray <- phyloseq::distance(serpnon.field_prop, method="bray")
+sampledf.field <- data.frame(sample_data(serpnon.field_prop))
+adonis.field.bray <- adonis(serpnon.field.bray ~ plant*soil*site*plot, data = sampledf.field)
+adonis.field.bray
+
+#pairwise analysis
+#https://rdrr.io/github/Jtrachsel/funfuns/man/pairwise.adonis.html
+factors=sampledf.field$plant
+pairwise.adonis(otu_table(serpnon.field),factors,sim.method = "bray")
+
+#betadisper
+beta.field.bray <- betadisper(serpnon.field.bray, sampledf.field$soil, type="centroid")
+permutest(beta.field.bray)
+plot(beta.field.bray)
+TukeyHSD(beta.field.bray)
+```
+##Are there differentially abundant microbes in various FIELD plant species (incl. Bulk)?
+```{r fig.height = 220, fig.width = 50, fig.align = "center"}
+set.seed(711)
+packageVersion("DESeq2")
+
+diagdds.field = phyloseq_to_deseq2(serpnon.field, ~plant)
+
+gm_mean.field = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+geoMeans.field = apply(counts(diagdds.field), 1, gm_mean.field)
+diagdds.field = estimateSizeFactors(diagdds.field, geoMeans = geoMeans.field)
+
+diagdds.field = DESeq(diagdds.field, betaPrior = FALSE, test="Wald", fitType="parametric")
+
+# If "Error in `rownames<-`(`*tmp*`, value = c("sp1", "sp0")) : length of 'dimnames' [1] not equal to array extent" appears, increase alpha to .90 to determine if there is a lack of differential OTUs at alpha = 0.01 or if there is a problem with the code.
+res = results(diagdds.field, cooksCutoff = FALSE)
+alpha = 0.01
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(serpnon.field)[rownames(sigtab), ], "matrix"))
+sigtab = as.data.frame(sigtab)
+head(sigtab)
+
+subset.field <- subset_taxa(serpnon.field, taxa_names(serpnon.field)%in%rownames(sigtab))
+plot_bar(subset.field)
+dat <- psmelt(subset.field) # create data frame
+dat$LogAbund <- log10(dat$Abundance +1)
+dat.field.plant <- dat
+
+#Figure 2
+ggplot(dat, aes(x=plant, y=LogAbund, fill=Phylum)) + 
+  stat_summary(fun.y = mean, geom = "bar", color="black") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", width=0.3)+
+  #scale_y_continuous(trans='log10+1')+
+  facet_wrap(Genus~OTU~soil, scales="free") +
+  theme(text = element_text(size=25), axis.text.x = element_text(angle = 45, hjust = 1))
+
+f2 <- ggplot(dat, aes(x=plant, y=LogAbund, fill=soil)) + 
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge")+
+  #scale_y_continuous(trans='log10+1')+
+  facet_wrap(Genus~OTU~Phylum, scales="free") +
+  theme(text = element_text(size=25), axis.text.x = element_text(angle = 45, hjust = 1))
+f2
+```
+```{r}
+dat.field.subset.serpnonserp <- subset(dat, OTU %in% c("Seq316","Seq96","Seq185","Seq101","Seq2090","Seq135","Seq220","Seq112","Seq434"))
+#dat.field.subset.serp$OTU <- factor(dat.field.subset.col.serp$OTU, levels=c("Seq125","Seq316","Seq96", "Seq185","Seq101","Seq135","Seq229"))
+#dat.field.subset.serpnonserp$Genus <- factor(dat.field.subset.serpnonserp$Genus, levels=c("Methylobacterium","Massilia" "Rhizobium","Pseudomonas","Pseudomonas","Microvirga","Gemmatimonas","Bryobacter"))
+
+subset.serpnonserp <- ggplot(dat.field.subset.serpnonserp, aes(x=plant, y=LogAbund, fill=soil)) +
+facet_wrap(Genus~OTU~Phylum, ncol=2) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=FALSE) +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(text = element_text(size=9), axis.text.x = element_text(angle = 45, hjust = 1), axis.title.x=element_blank(), axis.title.y=element_blank(), plot.title = element_text(hjust=0.0)) + 
+  scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                              "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum")) +
+                     labs(title="Differential taxa", subtitle="by plant type")
+subset.serpnonserp
+```
+##Random Forest - FIELD soil type
+```{r}
+#https://rpubs.com/michberr/randomforestmicrobe
+#https://github.com/LangilleLab/microbiome_helper/wiki/Random-Forest-Tutorial#removing-rare-features
+
+#Identify and plot non-zero values for OTUs in a small number of samples
+otu_table_serpnon <- otu_table(serpnon.field_prop)
+otu_nonzero_counts <- apply(otu_table_serpnon, 1, function(y) sum(length(which(y > 0))))
+hist(otu_nonzero_counts, breaks=100, col="grey", main="", ylab="Number of OTUs", xlab="Number of Non-Zero Values")
+
+#removes features that are non-zero less than a specified proportion of the time
+#remove_rare <- function( table , cutoff_pro ) {
+#  row2keep <- c()
+#  cutoff <- ceiling( cutoff_pro * ncol(table) )  
+#  for ( i in 1:nrow(table) ) {
+#    row_nonzero <- length( which( table[ i , ]  > 0 ) ) 
+#    if ( row_nonzero > cutoff ) {
+#      row2keep <- c( row2keep , i)
+#    }
+#  }
+#  return( table [ row2keep , , drop=F ])
+#}
+
+#removed OTUs that have non-zero values in <= 20% of samples
+#If error says "OTU abundance must have non-zero dimensions," lower cutoff_pro before trouble shooting
+##cutoff_pro=0.01 leaves 104/113 samples; cutoff_pro>0.1 leaves 1 sample. I will not remove rare samples and use all samples in 
+#otu_table_rare_removed <- remove_rare(table=otu_table_serpnon, cutoff_pro=0.01)
+#dim(otu_table_serpnon)
+#dim(otu_table_rare_removed)
+
+#transformin data
+otu_table_scaled <- scale(otu_table_serpnon, center = TRUE, scale = TRUE)
+otu_table_asinh_mean_centred <- scale( asinh(otu_table_serpnon), center=TRUE, scale=FALSE)
+
+#predictors and response
+response <- as.factor(sample_data(serpnon.field_prop)$soil)
+predictors <- otu_table_serpnon
+
+# How many OTUs do we currently have? 
+ntaxa(serpnon.field_prop) #5736
+# Set prunescale 
+prunescale = 0.0001
+# Prune out rare OTUs by mean relative abundance set by prunescale
+#tax.mean <- taxa_sums(serpnon.field_prop)/nsamples(serpnon.field_prop)
+#sites.prune <- prune_taxa(tax.mean > prunescale, serpnon.field_prop)
+
+#sites.prune #1245
+```
+```{r}
+# Make a dataframe of training data with OTUs as column and samples as rows
+predictors <- otu_table(serpnon.field_prop)
+#predictors <- as.data.frame(predictors)
+dim(predictors)
+
+# Make one column for our outcome/response variable 
+response <- as.factor(sample_data(serpnon.field_prop)$soil)
+response2 <- as.factor(sample_data(serpnon.field_prop)$plant)
+sample_data(serpnon.field_prop)$soilplant <- paste(sample_data(serpnon.field_prop)$soil,sample_data(serpnon.field_prop)$plant)
+response3 <- as.factor(sample_data(serpnon.field_prop)$soilplant)
+dim(response)
+
+# Combine them into 1 data frame
+rf.data <- data.frame(response, predictors)
+```
+```{r}
+library(randomForest)
+```
+```{r}
+set.seed(2)
+erie.classify <- randomForest(response~., data = rf.data, ntree = 99)
+print(erie.classify)
+
+#write.csv(print(erie.classify), file="/Users/anigwe/Desktop/randomforest_plant.csv")
+
+# What variables are stored in the output?
+names(erie.classify)
+```
+```{r}
+# Make a data frame with predictor names and their importance
+imp <- importance(erie.classify)
+imp <- data.frame(predictors = rownames(imp), imp)
+
+# Order the predictor levels by importance
+imp.sort <- arrange(imp, desc(MeanDecreaseGini))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.sort
+#write.csv(imp.sort, file="/Users/anigwe/Desktop/imp.sort_plant.csv")
+
+# Select the top 10 predictors
+imp.20 <- imp.sort[1:10, ]
+
+
+# ggplot
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  scale_x_discrete(breaks=c("Seq71","Seq127", "Seq19", "Seq210", "Seq29", "Seq79", "Seq315", "Seq20", "Seq40", "Seq15"), labels=c("Skermanella","RB41","Sphingomonas", "Microvirga","Blastococcus","NA-Firmicutes","Acidibacter","Pseudonocardia","Methylobacterium","NA-Proteobacteria")) +
+  xlab("Predictors") +
+  ylab("Mean Decrease Gini") +
+  coord_flip() +
+  theme(text = element_text(size=14), axis.text.y = element_text(face="italic")) +
+  ggtitle("Predictors for Field Soil Type") +
+  coord_flip()
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/sf4.tiff", height=280, width=336, units='mm', dpi=150)
+```
+```{r}
+# What are those OTUs?
+library(knitr)
+otunames <- imp.20$predictors
+r <- rownames(tax_table(serpnon.field_prop)) %in% otunames
+rf.list<-as.data.frame(tax_table(serpnon.field_prop)[r, ])
+rf.list
+kable(tax_table(serpnon.field_prop)[r, ])
+
+#write.csv(print(imp.otunames), file="/Users/anigwe/Desktop/imp.otunames_plant.csv")
+```
+```{r}
+eerie <- subset_taxa(serpnon.field_prop, taxa_names(serpnon.field_prop) %in% otunames)
+plot_bar(eerie)
+
+eerie.df <- psmelt(eerie)
+eerie.df$LogAbund <- log10(eerie.df$Abundance +1)
+
+subset.eerie <- ggplot(eerie.df, aes(x=soil, y=LogAbund, fill=plant)) +
+facet_wrap(Genus~OTU~Phylum~site, scale="free", nrow=2) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  #expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=FALSE) +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(text = element_text(size=9), axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust=0.0)) + labs(title="Differential taxa", subtitle="by plant type") + scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                              "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum"))
+subset.eerie
+```
+
+##Are there differentially abundant microbes in various FIELD soil types? - Segetibacter
+```{r}
+set.seed(711)
+packageVersion("DESeq2")
+
+diagdds.field.soil = phyloseq_to_deseq2(serpnon.field, ~soil)
+
+gm_mean.field.soil = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+geoMeans.field.soil = apply(counts(diagdds.field.soil), 1, gm_mean.field.soil)
+diagdds.field.soil = estimateSizeFactors(diagdds.field.soil, geoMeans = geoMeans.field.soil)
+
+diagdds.field.soil = DESeq(diagdds.field.soil, betaPrior = FALSE, test="Wald", fitType="parametric")
+
+# If "Error in `rownames<-`(`*tmp*`, value = c("sp1", "sp0")) : length of 'dimnames' [1] not equal to array extent" appears, increase alpha to .90 to determine if there is a lack of differential OTUs at alpha = 0.01 or if there is a problem with the code.
+res.soil = results(diagdds.field.soil, cooksCutoff = FALSE)
+alpha.soil = 0.01
+sigtab.soil = res.soil[which(res.soil$padj < alpha.soil), ]
+sigtab.soil = cbind(as(sigtab.soil, "data.frame"), as(tax_table(serpnon.field)[rownames(sigtab.soil), ], "matrix"))
+sigtab.soil = as.data.frame(sigtab.soil)
+head(sigtab.soil)
+
+subset.field.soil <- subset_taxa(serpnon.field, taxa_names(serpnon.field)%in%rownames(sigtab.soil))
+plot_bar(subset.field.soil)
+dat.soil <- psmelt(subset.field.soil) # create data frame
+dat.soil$LogAbund <- log10(dat.soil$Abundance +1)
+
+ggplot(dat.soil, aes(x=soil, y=LogAbund, fill=plant)) + 
+  stat_summary(fun.y = mean, geom = "bar", color="black", position="dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge")+
+  #scale_y_continuous(trans='log10+1')+
+  facet_wrap(Genus~OTU~Phylum, scales="free") +
+  theme(text = element_text(size=25), axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+dat.soil$Species <- NA
+dat.soil.plant <- rbind(dat,dat.soil)
+
+dat.field.subset.serpnonserp <- subset(dat.soil.plant, OTU %in% c("Seq316","Seq96","Seq185","Seq101","Seq2090","Seq135","Seq220","Seq112","Seq434"))
+```
+##Remove T. fucatum
+```{r}
+serpnon.field.gpc <- serpnon %>% subset_samples(plant %in% c("Gilia","Plantago","Collinsia", "Bulk") & location == "field" & site != ".")
+```
+```{r}
+serpnon.field_prop.gpc <- transform_sample_counts(serpnon.field.gpc, function(x) x/sum(x))
+serpnon.field_prop.gpc <- subset_taxa(serpnon.field_prop.gpc,taxa_sums(serpnon.field_prop)>0)
+```
+```{r}
+#stats
+serpnon.field.bray.gpc <- phyloseq::distance(serpnon.field_prop.gpc, method="bray")
+sampledf.field.gpc <- data.frame(sample_data(serpnon.field_prop.gpc))
+adonis.field.bray.gpc <- adonis(serpnon.field.bray.gpc ~ plant*soil*site*plot, data = sampledf.field.gpc)
+adonis.field.bray.gpc
+```
+
+
+
+##Subset GREENHOUSE samples only
+```{r}
+serpnon.greenhouse <- serpnon %>% subset_samples(location == "greenhouse")
+serpnon.greenhouse
+```
+###Set greenhouse names
+```{r}
+greenhouse_names <- c(
+                    `Gilia` = "G. capitata",
+                    `Plantago` = "P. erecta",
+                    `Trifolium` = "T. willdenovii",
+                    `Bulk` = "Bulk"
+                    )
+```
+##Normalize GREENHOUSE data and determine amount of ASV assignments
+```{r}
+serpnon.greenhouse_prop <- transform_sample_counts(serpnon.greenhouse, function(x) x/sum(x))
+serpnon.greenhouse_prop <- subset_taxa(serpnon.greenhouse_prop,taxa_sums(serpnon.greenhouse_prop)>0)
+serpnon.greenhouse_prop
+dim(otu_table(serpnon.greenhouse_prop)) #4996
+```
+##What is the relative abundance of each phylum within the different GREENHOUSE samples?
+```{r serpnon_phylum}
+#wrangle data
+serpnon.greenhouse_phylum <- serpnon.greenhouse_prop %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  #transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)          
+
+#table of abundances
+sg_phylum <- serpnon.greenhouse_phylum %>% group_by(soil,plant,Phylum) %>% dplyr::summarise(mean(Abundance, na.rm = TRUE))
+colnames(sg_phylum)<-c("Soil","Plant","Phylum","mean")
+sg_phylum
+
+#visualize
+#Supplementary figure 4a
+sg_phylum_bar<-ggplot(serpnon.greenhouse_phylum, aes(x = plant, y = Abundance, fill = Phylum)) + theme_bw() +
+  facet_grid(.~soil) +
+  geom_bar(stat="identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(breaks=c("Bulk", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk","G. capitata","P. erecta","T. willdenovii")) +
+  scale_fill_viridis(discrete=TRUE, option="inferno") +
+  theme(text = element_text(size=20), axis.title.x=element_blank(), axis.text.x = element_text(angle=45, hjust=1)) +
+  ylab ("Relateve Abundance (Phyla > 2%)") +
+  theme(strip.text = element_text(face = "italic"))
+sg_phylum_bar
+```
+##What is the richness of GREENHOUSE soil x plant
+```{r}
+#Supplementary figure 4b
+sg_richness_plot <- plot_richness(serpnon.greenhouse_prop, x="plant", measures=c("Shannon", "Simpson"), color="soil") + geom_boxplot() + theme_bw() + scale_color_viridis(discrete=TRUE, option="inferno") + 
+  scale_x_discrete(labels=c("Bulk", "G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=20), axis.title.x=element_blank(), axis.text.x = element_text(face="italic", angle=45, hjust=1, vjust=0.9), legend.title=element_blank()) +
+  labs(title="Alpha Diversity Indicies", subtitle="Greenhouse")
+sg_richness_plot
+
+#Table of richness
+sg.richness <- estimate_richness(serpnon.greenhouse_prop, measures=c("Shannon", "Simpson"))
+sg.richness
+
+#statistics of richness metrics
+greenhouse.fit.shannon <- lm(estimate_richness(serpnon.greenhouse)$Shannon ~ soil*plant, data=as(sample_data(serpnon.greenhouse), "data.frame"))
+anova(greenhouse.fit.shannon)
+TukeyHSD(aov(greenhouse.fit.shannon))
+
+greenhouse.fit.simpson <- lm(estimate_richness(serpnon.greenhouse)$Simpson ~ soil*plant, data=as(sample_data(serpnon.greenhouse), "data.frame"))
+anova(greenhouse.fit.simpson)
+TukeyHSD(aov(greenhouse.fit.simpson))
+```
+
+##Are there differences in the microbial community composition of GREENHOUSE samples?
+```{r ordinate}
+#ordination
+ord.nmds.bray.greenhouse <- ordinate(serpnon.greenhouse_prop, method="NMDS", distance="bray")
+
+#Figure 4
+bg.facet <-plot_ordination(serpnon.greenhouse_prop, ord.nmds.bray.greenhouse, color="soil")  + facet_wrap(~plant, labeller = as_labeller(greenhouse_names)) + 
+  theme_bw() + theme(text = element_text(size=20), legend.title=element_blank()) + geom_point(size=5) +
+  theme(legend.text = element_text(size = 20)) + 
+  theme(strip.text = element_text(face = "italic")) + labs(title="NMDS of Bray-Curtis Dissimilarity", subtitle="Greenhouse") + scale_color_viridis(option="inferno")
+
+#stats
+serpnon.greenhouse.bray <- phyloseq::distance(serpnon.greenhouse_prop, method="bray")
+sampledf.greenhouse <- data.frame(sample_data(serpnon.greenhouse_prop))
+adonis.greenhouse.bray <- adonis(serpnon.greenhouse.bray ~ plant*soil*Week, data = sampledf.greenhouse)
+adonis.greenhouse.bray
+
+#betadisper
+beta.greenhouse.bray <- betadisper(serpnon.greenhouse.bray, sampledf.greenhouse$soil, type="centroid")
+permutest(beta.greenhouse.bray)
+plot(beta.greenhouse.bray)
+TukeyHSD(beta.greenhouse.bray)
+
+#pairwise
+factors=sampledf.greenhouse$plant
+pairwise.adonis(otu_table(serpnon.greenhouse),factors,sim.method = "bray")
+```
+##Random Forest - GREENHOUSE
+```{r}
+# Make a dataframe of training data with OTUs as column and samples as rows
+predictors.g <- otu_table(serpnon.greenhouse_prop)
+#predictors <- as.data.frame(predictors)
+dim(predictors.g)
+
+# Make one column for our outcome/response variable 
+response.g <- as.factor(sample_data(serpnon.greenhouse_prop)$soil)
+#response2 <- as.factor(sample_data(serpnon.field_prop)$plant)
+#sample_data(serpnon.field_prop)$soilplant <- paste(sample_data(serpnon.field_prop)$soil,sample_data(serpnon.field_prop)$plant)
+#response3 <- as.factor(sample_data(serpnon.field_prop)$soilplant)
+#dim(response)
+
+# Combine them into 1 data frame
+rf.data.g <- data.frame(response.g, predictors.g)
+```
+```{r}
+library(randomForest)
+```
+```{r}
+set.seed(2)
+erie.classify.g <- randomForest(response.g~., data = rf.data.g, ntree = 6001)
+print(erie.classify.g)
+
+write.csv(print(erie.classify.g), file="/Users/anigwe/Desktop/randomforest_greenhouse.csv")
+
+# What variables are stored in the output?
+names(erie.classify.g)
+```
+```{r}
+# Make a data frame with predictor names and their importance
+imp.g <- importance(erie.classify.g)
+imp.g <- data.frame(predictors.g = rownames(imp.g), imp.g)
+
+# Order the predictor levels by importance
+imp.sort.g <- arrange(imp.g, desc(MeanDecreaseGini))
+imp.sort.g$predictors.g <- factor(imp.sort.g$predictors.g, levels = imp.sort.g$predictors.g)
+imp.sort.g
+write.csv(imp.sort.g, file="/Users/anigwe/Desktop/imp.sort_greenhouse.csv")
+
+# Select the top 10 predictors
+imp.20.g <- imp.sort.g[1:10, ]
+
+
+# ggplot
+ggplot(imp.20.g, aes(x = predictors.g, y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important OTUs for classifying soil samples\n into soil types")
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/sf8.tiff", height=280, width=336, units='mm', dpi=150)
+```
+```{r}
+# What are those OTUs?
+otunames.g <- imp.20.g$predictors.g
+r.g <- rownames(tax_table(serpnon.greenhouse_prop)) %in% otunames.g
+kable(tax_table(serpnon.greenhouse_prop)[r.g, ])
+
+#write.csv(print(imp.otunames.g), file="/Users/anigwe/Desktop/imp.otunames_greenhouse.csv")
+```
+```{r}
+eerie.g <- subset_taxa(serpnon.greenhouse_prop, taxa_names(serpnon.greenhouse_prop) %in% otunames.g)
+plot_bar(eerie.g)
+
+eerie.df.g <- psmelt(eerie.g)
+eerie.df.g$LogAbund <- log10(eerie.df.g$Abundance +1)
+
+subset.eerie.g <- ggplot(eerie.df.g, aes(x=soil, y=LogAbund, fill=soil)) +
+facet_wrap(Genus~OTU~Phylum, scale="free", nrow=2) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  #expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=FALSE) +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(text = element_text(size=9), axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust=0.0)) + labs(title="Differential taxa", subtitle="by soil type") #+ scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                             # "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum"))
+subset.eerie.g
+```
+
+##Are there differentially abundant microbes in various GREENHOUSE plant species (incl. Bulk)?
+```{r}
+set.seed(711)
+packageVersion("DESeq2")
+
+diagdds.greenhouse = phyloseq_to_deseq2(serpnon.greenhouse, ~plant)
+
+gm_mean.greenhouse = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+geoMeans.greenhouse = apply(counts(diagdds.greenhouse), 1, gm_mean.greenhouse)
+diagdds.greenhouse = estimateSizeFactors(diagdds.greenhouse, geoMeans = geoMeans.greenhouse)
+
+diagdds.greenhouse = DESeq(diagdds.greenhouse, betaPrior = FALSE, test="Wald", fitType="parametric")
+
+# If "Error in `rownames<-`(`*tmp*`, value = c("sp1", "sp0")) : length of 'dimnames' [1] not equal to array extent" appears, increase alpha to .90 to determine if there is a lack of differential OTUs at alpha = 0.01 or if there is a problem with the code.
+res = results(diagdds.greenhouse, cooksCutoff = FALSE)
+alpha = 0.01
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(serpnon.greenhouse)[rownames(sigtab), ], "matrix"))
+sigtab = as.data.frame(sigtab)
+head(sigtab)
+
+subset.greenhouse <- subset_taxa(serpnon.greenhouse, taxa_names(serpnon.greenhouse)%in%rownames(sigtab))
+plot_bar(subset.greenhouse)
+dat <- psmelt(subset.greenhouse) # create data frame
+dat$LogAbund <- log10(dat$Abundance +1)
+dat.greenhouse.plant <- dat
+
+sf5 <- ggplot(dat, aes(x=plant, y=LogAbund, fill=Phylum)) + 
+  stat_summary(fun.y = mean, geom = "bar", color="black") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", width=0.3)+
+  #scale_y_continuous(trans='log10+1')+
+  facet_wrap(Genus~OTU~soil, scales="free") +
+  theme(text = element_text(size=25), axis.text.x = element_text(angle = 45, hjust = 1))
+sf5
+```
+##Are there differentially abundant microbes in various GREENHOUSE soil types?
+```{r}
+set.seed(711)
+packageVersion("DESeq2")
+
+diagdds.greenhouse = phyloseq_to_deseq2(serpnon.greenhouse, ~soil)
+
+gm_mean.greenhouse = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+geoMeans.greenhouse = apply(counts(diagdds.greenhouse), 1, gm_mean.greenhouse)
+diagdds.greenhouse = estimateSizeFactors(diagdds.greenhouse, geoMeans = geoMeans.greenhouse)
+
+diagdds.greenhouse = DESeq(diagdds.greenhouse, betaPrior = FALSE, test="Wald", fitType="parametric")
+
+# If "Error in `rownames<-`(`*tmp*`, value = c("sp1", "sp0")) : length of 'dimnames' [1] not equal to array extent" appears, increase alpha to .90 to determine if there is a lack of differential OTUs at alpha = 0.01 or if there is a problem with the code.
+res = results(diagdds.greenhouse, cooksCutoff = FALSE)
+alpha = 0.01
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(serpnon.greenhouse)[rownames(sigtab), ], "matrix"))
+sigtab = as.data.frame(sigtab)
+head(sigtab)
+
+subset.greenhouse <- subset_taxa(serpnon.greenhouse, taxa_names(serpnon.greenhouse)%in%rownames(sigtab))
+plot_bar(subset.greenhouse)
+dat <- psmelt(subset.greenhouse) # create data frame
+dat$LogAbund <- log10(dat$Abundance +1)
+
+sf6 <- ggplot(dat, aes(x=soil, y=LogAbund, fill=Phylum)) + 
+  stat_summary(fun.y = mean, geom = "bar", color="black") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", width=0.3)+
+  #scale_y_continuous(trans='log10+1')+
+  facet_wrap(Genus~OTU, scales="free") +
+  theme(text = element_text(size=25), axis.text.x = element_text(angle = 45, hjust = 1))
+sf6
+```
+#Growth Analysis
+##Load data and correct data types
+```{r metadata, results="hide"}
+metadata <- read.csv("/Users/anigwe/Desktop/R/serpnonserp_summer2016/growth_analysis/Input/serpnon_summer2016_growth_metadata2.csv", na.strings=c("."))
+str(metadata)
+metadata$ID <- as.factor(metadata$ID)
+metadata$Tray <- as.factor(metadata$Tray)
+metadata$Date <- as.Date(metadata$Date, format="%m/%d/%Y")
+metadata$Week <- as.factor(metadata$Week)
+metadata$Presence <- as.factor(metadata$Presence)
+metadata$Leaves <- as.numeric(metadata$Leaves)
+metadata$Flowering <- as.factor(metadata$Flowering)
+metadata$Adj.Week <- as.factor(metadata$Adj.Week)
+str(metadata)
+```
+##Subset data to include "Week 11" data only (Adj.Week=11) and excluding Chlorogalum
+```{r subset week 11}
+serpnon.11 <- subset(metadata,metadata$Adj.Week==11&metadata$Plant!="Chlorogalum")
+```
+##Load libraries
+```{r load libraries dplyr; ggplot, include=FALSE}
+library("lsmeans")
+library("lme4") #lmer
+library("car") #for Anova
+```
+##Do serpentine microbes influence plant growth on serpentine?
+###Survival analysis
+```{r}
+#http://www.sthda.com/english/wiki/identifying-and-removing-duplicate-data-in-r
+#https://www.datacamp.com/community/tutorials/survival-analysis-R
+#https://github.com/kassambara/survminer/issues/67
+#http://sphweb.bumc.bu.edu/otlt/MPH-Modules/BS/R/R7_LogisticRegression-Survival/R7_LogisticRegression-Survival4.html
+#https://rpubs.com/daspringate/survival
+#http://rpubs.com/sinhrks/plot_surv
+#https://stats.idre.ucla.edu/r/faq/how-can-i-identify-the-first-and-last-observations-within-a-group-in-r/
+#https://bioconnector.org/r-survival.html
+#https://stackoverflow.com/questions/19944334/extract-rows-for-the-first-occurrence-of-a-variable-in-a-data-frame
+#http://www.sthda.com/english/rpkgs/survminer/survminer_cheatsheet.pdf
+
+#import data, change "Date" format
+library(lubridate)
+serpsurv <- read.csv("/Users/anigwe/Downloads/SerpNon_Summer2016_growth.csv", na.strings=c(".", " ", "", "NA"))
+serpsurv$Date = as.Date(serpsurv$Date, "%m/%d/%Y")
+x <- as.Date(serpsurv$Date, "%m/%d/%Y")
+year(x) <- 2016
+serpsurv$Date <- x
+str(serpsurv)
+sapply(serpsurv, class)
+      
+#subset data into 2 data frames: 1) Week 1 data (start of experiment) and 2) First occurence of "Presence" == 1 (event). Then 2 data frames are combined to include start and stop of event.
+#serpw1 <- serpsurv[serpsurv$Week<7 & serpsurv$Plant!="Chlorogalum",]
+serp_w1 <- serpsurv[serpsurv$Week==1 & serpsurv$Plant!="Chlorogalum",]
+#Drop Level for Chlorogalum
+serp_w1$Plant <- droplevels(serp_w1)$Plant
+serp_p1 <- serpsurv[serpsurv$Week<=7 & serpsurv$Presence==1 & serpsurv$Plant!="Chlorogalum",]
+serp_p1$Plant <- droplevels(serp_p1)$Plant
+serp_p1 <- serp_p1[match(unique(serp_p1$ID), serp_p1$ID),]
+#https://www.statmethods.net/management/merging.html
+serp_w1p1 <- rbind(serp_w1, serp_p1)
+
+serp_w1p1$Presence = serp_w1p1$Presence == "1"
+
+library(dplyr)
+
+#calculate time to event ("Presence" == 1)
+y2 <- serp_w1p1 %>%
+  arrange(ID, Week) %>%
+  group_by(ID) %>%
+  mutate(diff = Week - lag(Week))
+y2
+
+#subset "Presence" = TRUE and change column name
+y2.t <- subset(y2, y2$Presence==TRUE & diff!="NA")
+y2.t$stop <- y2.t$diff
+
+#subset "Presence" = FALSE
+y2.f <- subset(y2, y2$Presence==FALSE)
+
+#remove "Presence" = TRUE IDs from y2.f
+y3 <- y2.f[!y2.t$ID %in% y2.f$ID, ]
+
+#join data frames to include all IDs, check for duplicates, then remove duplicated and ID==NA
+y4 <- rbind(y2.t, y3)
+y4$ID[duplicated(y4$ID)]
+y4 <- y4[!duplicated(y4$ID), ]
+y4 <- subset(y4, ID!="NA")
+y4[1:260,19] <- 0
+colnames(y4)[colnames(y4)=="diff"] <- "start"
+
+
+library("survival")
+library("survminer")
+packageVersion("survival")
+packageVersion("survminer")
+
+cox.fit.soil <- coxph(Surv(stop, Presence)~Soil, data=y4)
+cox.fit.plant <- coxph(Surv(stop, Presence)~Plant, data=y4)
+cox.fit.soil
+cox.fit.plant
+summary(cox.fit.soil)
+summary(cox.fit.plant)
+ggforest(cox.fit.soil, data=y4, main = "Hazard ratio for seedling establishment")
+ggforest(cox.fit.plant, data=y4, main = "Hazard ratio for seedling establishment")
+
+cox.fit <- coxph(Surv(stop, Presence)~Soil+Plant, data=y4)
+cox.fit
+summary(cox.fit)
+ggforest(cox.fit, data=y4, main="Hazard ratio for seedling establishment")
+#survdiff(Surv(stop, Presence)~Soil+Plant+(1|Tray), data=y4)
+
+
+#sfit <- survfit(Surv(stop, Presence)~Soil+Plant+(1|Tray), data=y4)
+#sfit
+#summary(sfit)
+#ggsurvplot(sfit, color="Soil", fun="event") +  facet_grid(~Plant)
+```
+###Leaves x Plant Type
+```{r leaves x plant sum.stats}
+ls_summary <- serpnon.11 %>% dplyr::group_by(Plant,Soil) %>% dplyr::summarise(n(),sd(Leaves, na.rm = TRUE),mean(Leaves, na.rm = TRUE),min(Leaves, na.rm = TRUE),max(Leaves, na.rm = TRUE),var(Leaves, na.rm = TRUE))
+print(ls_summary)
+
+#http://www.sthda.com/english/wiki/ggplot2-axis-ticks-a-guide-to-customize-tick-marks-and-labels
+lbs.box.11 <- ggplot(serpnon.11, aes(serpnon.11$Plant, serpnon.11$Leaves, fill=Soil))
+lbs.box.11 + theme_bw() + 
+  geom_boxplot(aes(middle=mean(serpnon.11$Leaves))) +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(axis.text.x = element_text(face="italic")) +
+  ggtitle("Number of Leaves") +
+  xlab("Plant") +
+  ylab("Number") +
+  guides(fill=guide_legend(title=NULL))
+
+lbs.lmer <- lmer(Leaves ~Plant*Soil + (1|Week) + (1|Tray), data=serpnon.11, na.action = na.exclude)
+summary(lbs.lmer)
+
+aov.lbs.lme <- Anova(lbs.lmer)
+aov.lbs.lme
+summary(aov.lbs.lme)
+
+lsmeans(lbs.lmer, pairwise~Plant, adjust="tukey")
+lsmeans(lbs.lmer, pairwise~Plant*Soil, adjust="tukey")
+```
+###Root Length x Plant
+```{r root.length x plant sum.stats}
+rls_summary <- serpnon.11 %>% dplyr::group_by(Plant,Soil) %>% dplyr::summarise(n(),sd(root.length, na.rm = TRUE),mean(root.length, na.rm = TRUE),min(root.length, na.rm = TRUE),max(root.length, na.rm = TRUE),var(root.length, na.rm = TRUE))
+print(rls_summary)
+
+rls_summary <- serpnon.11 %>% dplyr::group_by(Soil) %>% dplyr::summarise(n(),sd(root.length, na.rm = TRUE),mean(root.length, na.rm = TRUE),min(root.length, na.rm = TRUE),max(root.length, na.rm = TRUE),var(root.length, na.rm = TRUE))
+print(rls_summary)
+
+rl.box.11 <- ggplot(serpnon.11, aes(serpnon.11$Plant, serpnon.11$root.length, fill=Soil))
+rl.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(axis.text.x = element_text(face="italic")) +
+  ggtitle("Root Length") +
+  xlab("Plant") +
+  ylab("Root Length (cm)") +
+  guides(fill=guide_legend(title=NULL))
+
+rls.lme <- lmer(root.length ~Plant*Soil + (1|Week) + (1|Tray), data=serpnon.11, na.action = na.exclude)
+summary(rls.lme)
+
+aov.rls.lme <- Anova(rls.lme)
+aov.rls.lme
+summary(aov.rls.lme)
+
+lsmeans(rls.lme, pairwise~Soil, adjust="tukey")
+lsmeans(rls.lme, pairwise~Soil*Plant, adjust="tukey")
+```
+###Plant Biomass x Soil
+```{r plant.biomass x soil sum.stats}
+pbs_summary <- serpnon.11 %>% group_by(Plant,Soil) %>% dplyr::summarise(n(),sd(plant.biomass, na.rm = TRUE),mean(plant.biomass, na.rm = TRUE),min(plant.biomass, na.rm = TRUE),max(plant.biomass, na.rm = TRUE),var(plant.biomass, na.rm = TRUE))
+print(pbs_summary)
+
+#http://rstudio-pubs-static.s3.amazonaws.com/93467_cf5ddf1c1e924f1f92caff0e784bb2e5.html
+pb.box.11 <- ggplot(serpnon.11, aes(serpnon.11$Plant, serpnon.11$plant.biomass, fill=Soil))
+pb.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(axis.text.x = element_text(face="italic")) +
+  #coord_cartesian(ylim=c(0,5)) +
+  scale_y_continuous(limits = c(0, 2)) +
+  ggtitle("Plant Biomass") +
+  xlab("Plant") +
+  ylab("Mass (g)") +
+  guides(fill=guide_legend(title=NULL))
+
+pbs.lme <- lmer(plant.biomass~Plant*Soil + (1|Week) + (1|Tray), data=serpnon.11, na.action = na.exclude)
+summary(pbs.lme)
+
+aov.pbs.lme <- Anova(pbs.lme)
+aov.pbs.lme
+summary(aov.pbs.lme)
+
+lsmeans(pbs.lme, pairwise~Plant, adjust="tukey")
+```
+###Shoot/Root x Soil
+```{r shoot.root x soil sum.stats}
+srs_summary <- serpnon.11 %>% group_by(Plant,Soil) %>% dplyr::summarise(n(),sd(shoot.root, na.rm = TRUE),mean(shoot.root, na.rm = TRUE),min(shoot.root, na.rm = TRUE),max(shoot.root, na.rm = TRUE),var(shoot.root, na.rm = TRUE))
+print(srs_summary)
+
+sr.box.11 <- ggplot(serpnon.11, aes(serpnon.11$Plant, serpnon.11$shoot.root, fill=Soil))
+sr.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(axis.text.x = element_text(face="italic")) +
+  coord_cartesian(ylim=c(0,4)) +
+  #scale_y_continuous(limits = c(0, 5)) +
+  ggtitle("Shoot-to-Root Ratio") +
+  xlab("Plant") +
+  ylab("Shoot/Root Ratio") +
+  guides(fill=guide_legend(title=NULL))
+
+srs.lme <- lmer(shoot.root~Plant*Soil + (1|Week) + (1|Tray), data=serpnon.11, na.action = na.exclude)
+summary(srs.lme)
+
+aov.srs.lme <- Anova(srs.lme)
+aov.srs.lme
+summary(aov.srs.lme)
+
+lsmeans(srs.lme, pairwise~Plant, adjust="tukey")
+```
+#Article figures
+##Table 1 - Plant Characteristics
+##Figure 1 - Field NMDS
+```{r}
+#Figure 1 - widen plot
+f1 <- plot_ordination(serpnon.field_prop, ord.nmds.bray.field, color="soil", shape="site") + facet_grid(~plant, labeller = as_labeller(field_names)) +
+  theme_bw() + theme(text = element_text(size=16), legend.position="bottom") + geom_point(size=4, colour="black") + geom_point(size=3) +
+  theme(legend.text = element_text(size = 16)) +
+  theme(strip.text = element_text(face = "italic")) + labs(color="Soil Type",shape="Site")
+f1 + scale_color_viridis(discrete=TRUE)
+ggsave("/Users/anigwe/Desktop/serpnon_figures/f1.tiff", height=100, width=200, units='mm', dpi=150)
+```
+##Microvirga Abundance
+```{r}
+eerie.df$Phylum2 <- factor(eerie.df$Phylum, levels=c(""))
+
+eerie.df.microvirga <- subset(eerie.df, Genus=="Microvirga")
+eerie.df.microvirga
+
+subset.eerie.microvirga <- ggplot(eerie.df.microvirga, aes(x=soil, y=Abundance, fill=plant)) +
+facet_wrap(Phylum~Genus~OTU, scale="free") + theme_bw() +
+  scale_fill_viridis(discrete=TRUE) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  #expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=guide_legend(title="Plant Type"), face="plain") +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(strip.text = element_text(size=32, face="italic"), text=element_text(size=28), legend.text = element_text(face = "plain"), plot.title = element_text(hjust=0.0)) + ggtitle("") +
+  scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                              "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum")) + xlab("Soil Type") + ylab("Relative Abundance")
+subset.eerie.microvirga
+ggsave("/Users/anigwe/Desktop/microvirga_rf.png", height=280, width=336, units='mm', dpi=150)
+```
+##Figure 2 - Random Forest
+```{r}
+eerie.df$Phylum2 <- factor(eerie.df$Phylum, levels=c(""))
+
+subset.eerie <- ggplot(eerie.df, aes(x=soil, y=LogAbund, fill=plant)) +
+facet_wrap(Phylum~Genus~OTU, scale="free", nrow=2) + theme_bw() +
+  scale_fill_viridis(discrete=TRUE) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  #expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=guide_legend(title="Soil Type"), face="plain") +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(strip.text = element_text(size=16, face="italic"), text=element_text(size=16), legend.position="bottom", legend.text = element_text(face = "plain"), plot.title = element_text(hjust=0.0), axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                              "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum")) + xlab("Soil Type") + ylab("Log Abundance")
+subset.eerie
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/f2.tiff", height=280, width=336, units='mm', dpi=150)
+```
+
+##Figure 2 - DESeq
+```{r}
+subset.serpnonserp <- ggplot(dat.field.subset.serpnonserp, aes(x=plant, y=LogAbund, fill=soil)) +
+facet_wrap(Phylum~Genus~OTU, ncol=3) + theme_bw() +
+  scale_fill_viridis(discrete=TRUE) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black",position="dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position="dodge") +
+  expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=guide_legend(title="Soil Type"), face="plain") +
+  #guides(fill=FALSE) +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(strip.text = element_text(size=16, face="italic"), text=element_text(size=16), legend.position="bottom", legend.text = element_text(face = "plain"), plot.title = element_text(hjust=0.0), axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                              "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum")) + xlab("Plant Species") + ylab("Log Abundance")
+subset.serpnonserp
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/f2.tiff", height=220, width=336, units='mm', dpi=150)
+```
+##Figure 3 - Survival Analysis
+```{r}
+ggforest(cox.fit, data=y4, fontsize=1.05, main = "Hazard ratio for seedling establishment")
+
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/f3.tiff", height=180, width=228, units='mm', dpi=150)
+```
+##Figure 4 - Growth Analysis
+```{r}
+p1 <- lbs.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_fill_viridis(discrete=TRUE, option="inferno") +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=16), axis.title.x=element_blank(), axis.text.x=element_blank()) + 
+  xlab("Plant") +
+  ylab("Number of Leaves") +
+  #scale_fill_brewer(palette="Spectral") +
+  guides(fill=FALSE)
+p1
+
+p2 <- rl.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_fill_viridis(discrete=TRUE, option="inferno") +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=16), axis.title.x=element_blank(), axis.text.x=element_blank()) +
+  xlab("Plant") +
+  ylab("Root Length (cm)") +
+  #scale_fill_brewer(palette="Spectral") +
+  guides(fill=FALSE)
+
+p3 <- pb.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_fill_viridis(discrete=TRUE, option="inferno") +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=16), axis.text.x = element_text(face="italic")) +
+  scale_y_continuous(limits = c(0, 2)) +
+  xlab("Plant Species") +
+  ylab("Plant Biomass (g)") +
+  #scale_fill_brewer(palette="Spectral") +
+  guides(fill=FALSE)
+
+p4 <- sr.box.11 + theme_bw() + 
+  geom_boxplot() +
+  scale_fill_viridis(discrete=TRUE, option="inferno") +
+  scale_x_discrete(labels=c("G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=16), axis.text.x = element_text(face="italic")) +
+  coord_cartesian(ylim=c(0,4)) +
+  #scale_y_continuous(limits = c(0, 5)) +
+  xlab("Plant Species") +
+  ylab("Shoot/Root Ratio") +
+  #scale_fill_brewer(palette="Spectral") +
+  guides(fill=guide_legend(title="Soil Type"))
+
+
+f3 <- ggarrange(p1, p2, p3, p4, ncol=2, nrow=2, common.legend = TRUE, legend="bottom", labels="auto", hjust=-0.5, vjust=2, align="v", widths=c(5,5), font.label=list(size=16))
+f3
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/f4.tiff", height=228, width=228, units='mm', dpi=150)
+```
+##Supplemental Figure 1 - Maps - QGIS
+###Load libraries
+```{r}
+#http://www.cookbook-r.com/Graphs/Legends_(ggplot2)/
+#http://eriqande.github.io/rep-res-web/lectures/making-maps-with-R.html
+#http://data-analytics.net/cep/Schedule_files/geospatial.html
+#https://medium.com/fastah-project/a-quick-start-to-maps-in-r-b9f221f44ff3
+#http://www.sharpsightlabs.com/blog/map-talent-competitiveness/
+#https://blog.dominodatalab.com/geographic-visualization-with-rs-ggmaps/
+#https://ryanpeek.github.io/mapping_in_R/spatial_kml.html
+library(ggmap)
+library(maps)
+library(mapdata)
+library(dplyr)
+library(ggplot2)
+library("ggpubr")
+```
+###Import map data
+```{r}
+#https://mygeodata.cloud/converter/kml-to-csv
+serpnon.map <- read.csv("/Users/anigwe/Desktop/R/serpnonserp_summer2016/Article/serpnonserpmap.csv")
+#serpnon.map <- subset(serpnon.map, select=c(x,y,soil,description))
+serpnon.map$lon <- as.numeric(as.character(serpnon.map$lon))
+serpnon.map$lat <- as.numeric(as.character(serpnon.map$lat))
+serpnon.map$om_percent_rating <- as.numeric(as.character(serpnon.map$om_percent_rating))
+serpnon.map$om_enr <- as.numeric(as.character(serpnon.map$om_enr))
+serpnon.map$weak_bray <- as.numeric(as.character(serpnon.map$weak_bray))
+serpnon.map$olsen_method <- as.numeric(as.character(serpnon.map$olsen_method))
+serpnon.map$potassium <- as.numeric(as.character(serpnon.map$potassium))
+serpnon.map$magnesium <- as.numeric(as.character(serpnon.map$magnesium))
+serpnon.map$calcium <- as.numeric(as.character(serpnon.map$calcium))
+serpnon.map$sodium <- as.numeric(as.character(serpnon.map$sodium))
+serpnon.map$pH <- as.numeric(as.character(serpnon.map$pH))
+serpnon.map$hydrogen <- as.numeric(as.character(serpnon.map$hydrogen))
+serpnon.map$cec <- as.numeric(as.character(serpnon.map$cec))
+serpnon.map$k_percent <- as.numeric(as.character(serpnon.map$k_percent))
+serpnon.map$mg_percent <- as.numeric(as.character(serpnon.map$mg_percent))
+serpnon.map$ca_percent <- as.numeric(as.character(serpnon.map$ca_percent))
+serpnon.map$h_percent <- as.numeric(as.character(serpnon.map$h_percent))
+serpnon.map$na_percent <- as.numeric(as.character(serpnon.map$na_percent))
+serpnon.map$sulfur <- as.numeric(as.character(serpnon.map$sulfur))
+serpnon.map$zinc <- as.numeric(as.character(serpnon.map$zinc))
+serpnon.map$manganese <- as.numeric(as.character(serpnon.map$manganese))
+serpnon.map$iron <- as.numeric(as.character(serpnon.map$iron))
+serpnon.map$copper <- as.numeric(as.character(serpnon.map$copper))
+serpnon.map$sand <- as.numeric(as.character(serpnon.map$sand))
+serpnon.map$silt <- as.numeric(as.character(serpnon.map$silt))
+serpnon.map$clay <- as.numeric(as.character(serpnon.map$clay))
+
+str(serpnon.map)
+```
+###Make maps - add labels
+```{r}
+#subset maps
+serpnon.map.subset <- subset(serpnon.map, location %in% c("MCL","HOP"))
+serpnon.map.hop <- subset(serpnon.map, location == "HOP")
+serpnon.map.mcl1 <- subset(serpnon.map, location == "MCL" & site %in% c("11","12"))
+serpnon.map.mcl2 <- subset(serpnon.map, location == "MCL" & site %in% c("1","2"))
+serpnon.map.mcl3 <- subset(serpnon.map, location == "MCL" & site %in% c("5","6","7","8"))
+serpnon.map.mcl4 <- subset(serpnon.map, location == "MCL" & site %in% c("3","4","9","10"))
+
+#all sites
+get_googlemap(center = c(mean(serpnon.map.subset$lon), mean(serpnon.map.subset$lat)), zoom = 6, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data=serpnon.map.subset, mapping = aes(x=lon,y=lat, shape = location), color="green", size=3) + labs(shape="Sampling Site")
+
+
+get_googlemap(center = c(mean(serpnon.map.subset$lon), mean(serpnon.map.subset$lat)), zoom = 9, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data=serpnon.map.subset, mapping = aes(x=lon,y=lat, shape = location, color=soil), size=3) + labs(shape="Sampling Site", color="Soil Type")
+ggsave("/Users/anigwe/Desktop/serpnon_figures/sf1.tiff", height=160, width=160, units='mm', dpi=600)
+
+
+#hopland
+hop.map <- qmap(center = c(mean(serpnon.map.hop$lon), mean(serpnon.map.hop$lat)), zoom = 13, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data = serpnon.map.hop, mapping = aes(x = lon, y = lat, color = soil)) +
+  geom_text(data = serpnon.map.hop, aes(label = site), angle = 60, hjust = 0, 
+            color = "black", size = 3)
+
+#mclaughlin
+mcl.map1 <- get_googlemap(center = c(mean(serpnon.map.mcl1$lon), mean(serpnon.map.mcl1$lat)), zoom = 16, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data = serpnon.map.mcl1, mapping = aes(x = lon, y = lat, color = soil)) +
+  geom_text(data = serpnon.map.mcl1, aes(label = site), angle = 60, hjust = 0, 
+            color = "black", nudge_x = .0001, nudge_y = .0004, size = 4.5)
+
+mcl.map2 <- get_googlemap(center = c(mean(serpnon.map.mcl2$lon), mean(serpnon.map.mcl2$lat)), zoom = 16, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data = serpnon.map.mcl2, mapping = aes(x = lon, y = lat, color = soil)) +
+  geom_text(data = serpnon.map.mcl2, aes(label = site), angle = 60, hjust = 0, 
+            color = "black", nudge_x = .0001, nudge_y = .0004, size = 4.5)
+
+mcl.map3 <- get_googlemap(center = c(mean(serpnon.map.mcl3$lon), mean(serpnon.map.mcl3$lat)), zoom = 15, maptype = "hybrid") %>%
+  ggmap() +
+  geom_point(data = serpnon.map.mcl3, mapping = aes(x = lon, y = lat, color = soil)) +
+  geom_text(data = serpnon.map.mcl3, aes(label = site), angle = 60, hjust = 0, 
+            color = "black", size = 3)
+
+```
+##Supplemental Table 1 - Attribute Table
+##Supplemental Table 2 - Soil Characteristics
+##Supplemental Figure 2 - Field richness and abundance
+```{r}
+#https://www.r-bloggers.com/how-to-expand-color-palette-with-ggplot-and-rcolorbrewer/
+#
+sf_richness_plot <- plot_richness(serpnon.field_prop, x="plant", measures=c("Shannon"), color="soil") + facet_grid(~site) + theme_bw() + geom_boxplot() + geom_point(position = position_dodge(width = 0.75)) + scale_colour_viridis(discrete=TRUE) + theme(text = element_text(size=16), axis.text.x= element_text(face="italic",angle=45, hjust=0.7, vjust=0.6)) + scale_x_discrete(breaks=c("Bulk", "Collinsia", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk", "C. sparsiflora", "G. tricolor","P. erecta","T. fucatum")) + labs(shape="Sampling Site", colour="Soil Type") + xlab("Plant Species")
+sf_richness_plot$layers <- sf_richness_plot$layers[-1]
+sf_richness_plot
+
+colourCount = length(unique(serpnon.field_phylum$Phylum))
+getPalette = colorRampPalette(brewer.pal(11, "PuOr"))
+
+sf_phylum_bar<-ggplot(serpnon.field_phylum, aes(x = plant, y = Abundance, fill = Phylum)) + 
+  theme_bw() +
+  scale_fill_manual(values = getPalette(colourCount)) +
+  #scale_fill_hue(l=40, c=35) +
+  facet_grid(.~soil) +
+  geom_bar(stat="identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  theme(text = element_text(size=16), axis.text.x = element_text(angle=45, hjust=1)) +
+  scale_x_discrete(breaks=c("Bulk", "Collinsia", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk", "C. sparsiflora", "G. tricolor","P. erecta","T. fucatum")) +
+  ylab ("Relateve Abundance (Phyla > 2%)") +
+  theme(axis.text.x = element_text(face = "italic"), legend.position="bottom") + guides(fill=guide_legend(nrow=6,byrow=FALSE)) + xlab("Plant Species")
+sf_phylum_bar
+ggarrange(sf_phylum_bar,sf_richness_plot,labels="auto")
+ggsave("/Users/anigwe/Desktop/serpnon_figures/sf3.tiff", height=168, width=336, units='mm', dpi=150)
+```
+##Supplemental Excel 1 - Field DESeq2
+```{r}
+#write.csv(dat.field.plant, file="/Users/anigwe/Desktop/DESeq2_dat_field_plant3.csv")
+write.csv(dat.soil, file="/Users/anigwe/Desktop/DESeq2_dat_soil.csv")
+```
+##Supplemental Figure 3 - Greenhouse richness and abundance
+```{r}
+sg_phylum_bar<-ggplot(serpnon.greenhouse_phylum, aes(x = plant, y = Abundance, fill = Phylum)) + theme_bw() +
+  scale_fill_brewer(type="div",palette="RdYlBu") +
+  facet_grid(.~soil) +
+  geom_bar(stat="identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(breaks=c("Bulk", "Gilia", "Plantago","Trifolium"),
+                      labels=c("Bulk","G. capitata","P. erecta","T. willdenovii")) +
+  #scale_fill_brewer(palette="Spectral") +
+  theme(text = element_text(size=16), axis.text.x = element_text(angle=45, hjust=1)) +
+  ylab ("Relateve Abundance (Phyla > 2%)") +
+  theme(strip.text = element_text(face = "italic")) + theme(axis.text.x = element_text(face = "italic"), legend.position="bottom") + guides(fill=guide_legend(nrow=6,byrow=FALSE)) + xlab("Plant Species")
+sg_phylum_bar 
+
+sg_richness_plot <- plot_richness(serpnon.greenhouse_prop, x="plant", measures=c("Shannon"), color="soil") + theme_bw() + geom_boxplot() + scale_colour_brewer(palette="RdYlBu") + geom_point(position = position_dodge(width = 0.75)) + #scale_color_brewer(palette="Spectral") + 
+  scale_x_discrete(labels=c("Bulk", "G. capitata", "P. erecta", "T. willdenovii")) +
+  theme(text = element_text(size=16), axis.text.x = element_text(face="italic", angle=45, hjust=1, vjust=0.9)) + labs(colour="Soil Type") + xlab("Plant Species")
+sg_richness_plot$layers
+sg_richness_plot$layers <- sg_richness_plot$layers[-1]
+sg_richness_plot 
+
+
+ggarrange(sg_phylum_bar,sg_richness_plot,labels="auto")
+ggsave("/Users/anigwe/Desktop/serpnon_figures/sf5.tiff", height=168, width=336, units='mm', dpi=150)
+```
+##Supplemental Figure 4 - Greenhouse NMDS
+```{r}
+f4 <- plot_ordination(serpnon.greenhouse_prop, ord.nmds.bray.greenhouse, color="soil")  + facet_wrap(~plant, labeller = as_labeller(greenhouse_names)) + scale_colour_brewer(palette="RdYlBu") +
+  theme_bw() + theme(text = element_text(size=16), legend.position="bottom") + geom_point(size=4, color="black") + geom_point(size=3) +
+  theme(axis.text.x = element_text(hjust=0.8, size = 16)) + 
+  theme(strip.text = element_text(face = "italic")) + #scale_color_brewer(palette="Spectral") +
+  labs(color="Soil Type")
+f4
+ggsave("/Users/anigwe/Desktop/serpnon_figures/sf8.tiff", height=100, width=160, units='mm', dpi=150)
+```
+##Supplemental Excel 2 - OTUs and ASVs
+```{r}
+#export serpnon (phyloseq object) before changing sequence names as _OTU. Then export serpnon after changing sequence name and remove _OTU
+#write.csv(serpnon@tax_table, file = "/Users/anigwe/Desktop/serpnon_taxtable.csv")
+```
+##Supplemental Figure 5 - rarefaction
+```{r}
+raremax <- max(rowSums(serpnon.otu))
+col <- c("black", "darkred", "forestgreen", "orange", "blue", "yellow", "hotpink")
+lty <- c("solid", "dashed", "longdash", "dotdash")
+lwd <- c(1, 2)
+pars <- expand.grid(col = col, lty = lty, lwd = lwd, 
+                    stringsAsFactors = FALSE)
+head(pars)
+
+out <- rarecurve(serpnon.otu, step = 50, col = col, lty = lty, lwd = lwd, label = FALSE)
+plot(out)
+
+col <- c("darkred", "forestgreen", "hotpink", "blue")
+set.seed(3)
+grp <- factor(sample(seq_along(col), nrow(serpnon.otu), replace = TRUE))
+cols <- col[grp]
+
+Nmax <- sapply(out, function(x) max(attr(x, "Subsample")))
+Smax <- sapply(out, max)
+plot(c(1, max(Nmax)), c(1, max(Smax)), xlab = "Sample Size",
+     ylab = "Species", type = "n")
+abline(v = raremax)
+for (i in seq_along(out)) {
+    N <- attr(out[[i]], "Subsample")
+    with(pars, lines(N, out[[i]], col = col[i], lty = lty[i], lwd = lwd[i]))
+}
+
+
+serpnon.otu <- as(otu_table(ps), "matrix")
+Rarecurve <- rarecurve((serpnon.otu), step = 50, cex=0.5, xlab = "Reads", ylab = "Amplicon Sequence Variants (ASV)", label = FALSE)
+
+ggrare(serpnon.otu, step = 50, label=TRUE)
+
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/sf2.tiff", height=280, width=336, units='mm', dpi=150)
+```
+
+##Supplemental Figure 6 - Random Forest (Greenhouse)
+```{r}
+# Make a dataframe of training data with OTUs as column and samples as rows
+predictors.g <- otu_table(serpnon.greenhouse_prop)
+#predictors <- as.data.frame(predictors)
+dim(predictors.g)
+
+# Make one column for our outcome/response variable 
+response.g <- as.factor(sample_data(serpnon.greenhouse_prop)$soil)
+#response2 <- as.factor(sample_data(serpnon.field_prop)$plant)
+#sample_data(serpnon.field_prop)$soilplant <- paste(sample_data(serpnon.field_prop)$soil,sample_data(serpnon.field_prop)$plant)
+#response3 <- as.factor(sample_data(serpnon.field_prop)$soilplant)
+#dim(response)
+
+# Combine them into 1 data frame
+rf.data.g <- data.frame(response.g, predictors.g)
+```
+```{r}
+library(randomForest)
+```
+```{r}
+set.seed(2)
+erie.classify.g <- randomForest(response.g~., data = rf.data.g, ntree = 6001)
+print(erie.classify.g)
+
+#write.csv(print(erie.classify.g), file="/Users/anigwe/Desktop/randomforest_greenhouse.csv")
+
+# What variables are stored in the output?
+names(erie.classify.g)
+```
+```{r}
+# Make a data frame with predictor names and their importance
+imp.g <- importance(erie.classify.g)
+imp.g <- data.frame(predictors.g = rownames(imp.g), imp.g)
+
+# Order the predictor levels by importance
+imp.sort.g <- arrange(imp.g, desc(MeanDecreaseGini))
+imp.sort.g$predictors.g <- factor(imp.sort.g$predictors.g, levels = imp.sort.g$predictors.g)
+imp.sort.g
+write.csv(imp.sort.g, file="/Users/anigwe/Desktop/imp.sort_greenhouse.csv")
+
+# Select the top 10 predictors
+imp.20.g <- imp.sort.g[1:10, ]
+
+
+# ggplot
+ggplot(imp.20.g, aes(x = predictors.g, y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  scale_x_discrete(breaks=c("Seq11","Seq41", "Seq4", "Seq20", "Seq118", "Seq199", "Seq18", "Seq14", "Seq22", "Seq8"), labels=c("Pseudomonas","Micromonospora","Blastococcus", "Pseudonocardia","Streptomyces","NA-Firmicutes","Microvirga","Paenarthrobacter","NA-Actinobacteria","NA-Firmicutes")) +
+  xlab("Predictors") +
+  ylab("Mean Decrease Gini") +
+  coord_flip() +
+  theme(text = element_text(size=14), axis.text.y = element_text(face="italic")) +
+  ggtitle("Predictors for Lathhouse Soil Type")
+ggsave("/Users/anigwe/Desktop/serpnon_figures/sf6.tiff", height=280, width=336, units='mm', dpi=150)
+```
+```{r}
+# What are those OTUs?
+otunames.g <- imp.20.g$predictors.g
+r.g <- rownames(tax_table(serpnon.greenhouse_prop)) %in% otunames.g
+kable(tax_table(serpnon.greenhouse_prop)[r.g, ])
+
+#write.csv(print(imp.otunames.g), file="/Users/anigwe/Desktop/imp.otunames_greenhouse.csv")
+```
+```{r}
+eerie.g <- subset_taxa(serpnon.greenhouse_prop, taxa_names(serpnon.greenhouse_prop) %in% otunames.g)
+plot_bar(eerie.g)
+
+eerie.df.g <- psmelt(eerie.g)
+View(eerie.df.g)
+eerie.df.g$LogAbund <- log10(eerie.df.g$Abundance +1)
+
+eerie.df.g$Phylum2 <- factor(eerie.df.g$Phylum, levels=c("Actinobacteria","Firmicutes", "Proteobacteria"))
+
+subset.eerie.g <- ggplot(eerie.df.g, aes(x=soil, y=LogAbund, fill=soil)) + theme_bw() +
+  scale_fill_brewer(type="div",palette="RdYlBu") +
+facet_wrap(Phylum2~Genus~OTU, scale="free", nrow=2) +
+  #scale_x_discrete(position="top") + coord_flip() +
+  stat_summary(fun.y = mean, geom = "bar", color="black", position = "dodge") + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = "dodge") +
+  #expand_limits(y=c(0,2)) +
+  theme_classic() +
+  guides(fill=guide_legend(title="Soil Type"), face="plain") +
+  #guides(fill=FALSE) +
+  #scale_y_continuous(trans='log10+1')+
+  #facet_wrap(~soil, scales="free") +
+  theme(strip.text = element_text(size=16, face="italic"), text=element_text(size=16), legend.position="bottom", legend.text = element_text(face = "plain"), plot.title = element_text(hjust=0.0), axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Plant Species") + ylab("Log Abundance") #+ scale_x_discrete(labels=c("." = "Bulk", "Collinsia" = "C. sparsiflora",
+                             # "Gilia" = "G. tricolor", "Plantago" = "P. erecta", "Trifolium" = "T. fucatum"))
+subset.eerie.g
+#ggsave("/Users/anigwe/Desktop/serpnon_figures/sf6.tiff", height=280, width=336, units='mm', dpi=150)
+```
